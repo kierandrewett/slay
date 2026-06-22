@@ -66,6 +66,7 @@ struct Opts {
     ignore_case: bool,
     yes: bool,
     user: Option<String>,
+    columns: Vec<Col>,
     targets: Vec<String>,
     list: bool,
     ports: bool,
@@ -98,6 +99,8 @@ Mix them freely:  slay firefox 4123 :8080
   -x, --exact          Require an exact name match
   -i, --ignore-case    Case-insensitive name matching
   -u, --user <USER>    Only match processes owned by USER
+  -c, --column <COL>   Add a column (repeatable, or comma-separated):
+                         ppid, mem, threads, state, nice, time, age
   -y, --yes            Don't ask for confirmation
   -l, --list           List matches instead of killing (a built-in pgrep)
       --ports          Show everything currently listening on a TCP port
@@ -108,6 +111,7 @@ Mix them freely:  slay firefox 4123 :8080
   slay node            # kill every process named like node (asks first)
   slay -9 -y firefox   # force-kill firefox, no questions
   slay -l vite -f      # list every process whose cmdline mentions vite
+  slay -l -c mem -c age node   # list node procs with memory and age columns
   slay :5432           # something on Postgres' port? kill it
   slay --ports         # what am I even listening on right now?",
         name = b("slay"),
@@ -126,6 +130,7 @@ fn parse_args() -> Result<Opts, String> {
         ignore_case: false,
         yes: false,
         user: None,
+        columns: Vec::new(),
         targets: Vec::new(),
         list: false,
         ports: false,
@@ -157,13 +162,30 @@ fn parse_args() -> Result<Opts, String> {
             "-u" | "--user" => {
                 o.user = Some(args.next().ok_or("--user needs a value")?);
             }
+            "-c" | "--column" => {
+                let v = args.next().ok_or("--column needs a value")?;
+                for part in v.split(',').filter(|x| !x.is_empty()) {
+                    o.columns.push(parse_col(part)?);
+                }
+            }
             s if s.starts_with("--signal=") => {
                 o.signal = parse_signal(&s["--signal=".len()..])?;
             }
             s if s.starts_with("--user=") => {
                 o.user = Some(s["--user=".len()..].to_string());
             }
-            // bundled short flags like -9y, -fx, -ny
+            s if s.starts_with("--column=") => {
+                for part in s["--column=".len()..].split(',').filter(|x| !x.is_empty()) {
+                    o.columns.push(parse_col(part)?);
+                }
+            }
+            // attached short form: -cmem or -cmem,threads
+            s if s.starts_with("-c") && s.len() > 2 && !s.starts_with("--") => {
+                for part in s[2..].split(',').filter(|x| !x.is_empty()) {
+                    o.columns.push(parse_col(part)?);
+                }
+            }
+            // bundled short flags like -9y, -fx
             s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
                 for ch in s[1..].chars() {
                     match ch {
@@ -382,36 +404,234 @@ fn name_matches(p: &Proc, pat: &str, o: &Opts) -> bool {
     }
 }
 
-// ─── rendering ──────────────────────────────────────────────────────────────
-fn print_table(procs: &[Proc], p: &Paint) {
-    let pid_w = procs.iter().map(|x| x.pid.to_string().len()).max().unwrap_or(3).max(3);
-    let user_w = procs.iter().map(|x| x.user.len()).max().unwrap_or(4).max(4);
-    let port_w = procs
-        .iter()
-        .map(|x| x.port.map(|v| v.to_string().len()).unwrap_or(1))
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let name_w = procs.iter().map(|x| x.name.len()).max().unwrap_or(7).max(7);
+// ─── columns ────────────────────────────────────────────────────────────────
+#[derive(Clone, Copy, PartialEq)]
+enum Col {
+    Pid,
+    User,
+    Port,
+    Name,
+    Cmd,
+    Ppid,
+    Mem,
+    Threads,
+    State,
+    Nice,
+    Time,
+    Age,
+}
 
-    println!(
-        "  {}  {}  {}  {}  {}",
-        p.bold(&format!("{:>pid_w$}", "PID")),
-        p.bold(&format!("{:<user_w$}", "USER")),
-        p.bold(&format!("{:>port_w$}", "PORT")),
-        p.bold(&format!("{:<name_w$}", "PROCESS")),
-        p.bold("COMMAND"),
-    );
-    for x in procs {
-        let port = x.port.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
-        println!(
-            "  {}  {}  {}  {}  {}",
-            p.dim(&format!("{:>pid_w$}", x.pid)),
-            p.dim(&format!("{:<user_w$}", x.user)),
-            p.cyan(&format!("{:>port_w$}", port)),
-            p.magenta(&format!("{:<name_w$}", x.name)),
-            p.dim(&x.cmdline),
-        );
+impl Col {
+    fn header(self) -> &'static str {
+        match self {
+            Col::Pid => "PID",
+            Col::User => "USER",
+            Col::Port => "PORT",
+            Col::Name => "PROCESS",
+            Col::Cmd => "COMMAND",
+            Col::Ppid => "PPID",
+            Col::Mem => "MEM",
+            Col::Threads => "THREADS",
+            Col::State => "STATE",
+            Col::Nice => "NICE",
+            Col::Time => "TIME",
+            Col::Age => "AGE",
+        }
+    }
+    fn right(self) -> bool {
+        matches!(self, Col::Pid | Col::Port | Col::Ppid | Col::Mem | Col::Threads | Col::Nice | Col::Time | Col::Age)
+    }
+    fn needs_stat(self) -> bool {
+        matches!(self, Col::Ppid | Col::Mem | Col::Threads | Col::State | Col::Nice | Col::Time | Col::Age)
+    }
+}
+
+fn parse_col(s: &str) -> Result<Col, String> {
+    Ok(match s.trim().to_lowercase().as_str() {
+        "ppid" => Col::Ppid,
+        "mem" | "rss" | "memory" => Col::Mem,
+        "threads" | "thr" | "nlwp" => Col::Threads,
+        "state" | "st" => Col::State,
+        "nice" | "ni" => Col::Nice,
+        "time" | "cpu" | "cputime" => Col::Time,
+        "age" | "etime" | "elapsed" | "start" => Col::Age,
+        other => {
+            return Err(format!(
+                "unknown column `{other}` (try: ppid, mem, threads, state, nice, time, age)"
+            ))
+        }
+    })
+}
+
+/// Fields lifted from /proc/<pid>/stat for the optional columns.
+struct Stat {
+    ppid: i32,
+    state: String,
+    cpu_ticks: u64,   // utime + stime
+    nice: i64,
+    threads: i64,
+    start_ticks: u64, // since boot
+    rss_pages: i64,
+}
+
+fn read_stat(pid: i32) -> Option<Stat> {
+    let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm (field 2) is parenthesised and may contain spaces/parens; everything
+    // after the final ')' is whitespace-separated starting at field 3 (state).
+    let close = s.rfind(')')?;
+    let f: Vec<&str> = s[close + 1..].split_whitespace().collect();
+    let g = |i: usize| f.get(i);
+    Some(Stat {
+        state: g(0)?.to_string(),
+        ppid: g(1)?.parse().ok()?,
+        cpu_ticks: g(11)?.parse::<u64>().ok()? + g(12)?.parse::<u64>().ok()?,
+        nice: g(16)?.parse().ok()?,
+        threads: g(17)?.parse().ok()?,
+        start_ticks: g(19)?.parse().ok()?,
+        rss_pages: g(21)?.parse().ok()?,
+    })
+}
+
+struct Sys {
+    page_size: u64,
+    clk_tck: u64,
+    uptime: f64,
+}
+
+fn sysinfo() -> Sys {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let uptime = fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|n| n.parse::<f64>().ok()))
+        .unwrap_or(0.0);
+    Sys { page_size, clk_tck, uptime }
+}
+
+fn human_bytes(b: u64) -> String {
+    const U: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b}B")
+    } else if v >= 10.0 {
+        format!("{:.0}{}", v, U[i])
+    } else {
+        format!("{:.1}{}", v, U[i])
+    }
+}
+
+fn human_dur(secs: u64) -> String {
+    let (d, h, m, s) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
+    if d > 0 {
+        format!("{d}d{h:02}h")
+    } else if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+fn cell(col: Col, pr: &Proc, st: &Option<Stat>, sys: &Sys) -> String {
+    match col {
+        Col::Pid => pr.pid.to_string(),
+        Col::User => pr.user.clone(),
+        Col::Port => pr.port.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        Col::Name => pr.name.clone(),
+        Col::Cmd => pr.cmdline.clone(),
+        _ => match st {
+            None => "?".into(),
+            Some(s) => match col {
+                Col::Ppid => s.ppid.to_string(),
+                Col::State => s.state.clone(),
+                Col::Nice => s.nice.to_string(),
+                Col::Threads => s.threads.to_string(),
+                Col::Mem => human_bytes(s.rss_pages.max(0) as u64 * sys.page_size),
+                Col::Time => human_dur(s.cpu_ticks / sys.clk_tck),
+                Col::Age => {
+                    let start_s = s.start_ticks as f64 / sys.clk_tck as f64;
+                    human_dur((sys.uptime - start_s).max(0.0) as u64)
+                }
+                _ => unreachable!(),
+            },
+        },
+    }
+}
+
+// ─── rendering ──────────────────────────────────────────────────────────────
+fn print_table(procs: &[Proc], extra: &[Col], p: &Paint) {
+    // PID USER PORT PROCESS  <extra…>  COMMAND  — COMMAND stays last (free width).
+    let mut cols = vec![Col::Pid, Col::User, Col::Port, Col::Name];
+    for &c in extra {
+        if !cols.contains(&c) {
+            cols.push(c);
+        }
+    }
+    cols.push(Col::Cmd);
+
+    let sys = sysinfo();
+    let need_stat = cols.iter().any(|c| c.needs_stat());
+    let stats: Vec<Option<Stat>> = procs
+        .iter()
+        .map(|pr| if need_stat { read_stat(pr.pid) } else { None })
+        .collect();
+
+    // precompute every cell so we can size columns
+    let rows: Vec<Vec<String>> = procs
+        .iter()
+        .zip(&stats)
+        .map(|(pr, st)| cols.iter().map(|&c| cell(c, pr, st, &sys)).collect())
+        .collect();
+
+    let widths: Vec<usize> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let w = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
+            w.max(c.header().len())
+        })
+        .collect();
+
+    let pad = |s: &str, w: usize, right: bool| {
+        if right { format!("{s:>w$}") } else { format!("{s:<w$}") }
+    };
+
+    // header
+    let mut line = String::from("  ");
+    for (i, c) in cols.iter().enumerate() {
+        let last = i == cols.len() - 1;
+        let w = if last { 0 } else { widths[i] };
+        line += &p.bold(&pad(c.header(), w, c.right()));
+        if !last {
+            line += "  ";
+        }
+    }
+    println!("{line}");
+
+    for (ri, r) in rows.iter().enumerate() {
+        let mut line = String::from("  ");
+        for (i, c) in cols.iter().enumerate() {
+            let last = i == cols.len() - 1;
+            let w = if last { 0 } else { widths[i] };
+            let text = pad(&r[i], w, c.right());
+            let painted = match c {
+                Col::Name => p.magenta(&text),
+                Col::Port => p.cyan(&text),
+                _ => p.dim(&text),
+            };
+            line += &painted;
+            if !last {
+                line += "  ";
+            }
+        }
+        let _ = ri;
+        println!("{line}");
     }
 }
 
@@ -432,7 +652,7 @@ fn signal_name(sig: i32) -> String {
 }
 
 // ─── listing ────────────────────────────────────────────────────────────────
-fn list_ports(procs: &[Proc], p: &Paint) {
+fn list_ports(procs: &[Proc], extra: &[Col], p: &Paint) {
     // Build inode→port for all TCP listeners, then map to pids.
     let mut inode_port: HashMap<u64, u16> = HashMap::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -487,7 +707,7 @@ fn list_ports(procs: &[Proc], p: &Paint) {
         println!("{} Nothing is listening on a TCP port.", p.green("✓"));
         return;
     }
-    print_table(&rows, p);
+    print_table(&rows, extra, p);
 }
 
 // ─── kill ───────────────────────────────────────────────────────────────────
@@ -530,7 +750,7 @@ fn main() {
 
     // --ports: the listening-ports overview (one feature, not the headline).
     if opts.ports {
-        list_ports(&procs, &p);
+        list_ports(&procs, &opts.columns, &p);
         return;
     }
 
@@ -538,7 +758,7 @@ fn main() {
     if opts.list && opts.targets.is_empty() {
         let mut all = procs.clone();
         all.sort_by_key(|x| x.pid);
-        print_table(&all, &p);
+        print_table(&all, &opts.columns, &p);
         return;
     }
 
@@ -622,7 +842,7 @@ fn main() {
             p.bold(&list.len().to_string()),
             word
         );
-        print_table(&list, &p);
+        print_table(&list, &opts.columns, &p);
         return;
     }
 
@@ -632,7 +852,7 @@ fn main() {
         p.bold(&list.len().to_string()),
         word
     );
-    print_table(&list, &p);
+    print_table(&list, &opts.columns, &p);
     println!();
 
     // Confirm unless -y. In a non-interactive shell, require -y for safety.

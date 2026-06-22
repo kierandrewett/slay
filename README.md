@@ -84,6 +84,7 @@ slay --ports              Show everything currently listening on a TCP port
 | `-x, --exact`         | Require an exact name match                           |
 | `-i, --ignore-case`   | Case-insensitive name matching                       |
 | `-u, --user <USER>`   | Only match processes owned by USER                   |
+| `-c, --column <COL>`  | Add a column to the table (repeatable)               |
 | `-y, --yes`           | Don't ask for confirmation                           |
 | `-l, --list`          | List matches instead of killing (a built-in pgrep)   |
 | `--ports`             | Show everything listening on a TCP port              |
@@ -91,6 +92,28 @@ slay --ports              Show everything currently listening on a TCP port
 | `-V, --version`       | Print version                                         |
 
 Short flags bundle: `slay -9y firefox` force-kills with no prompt.
+
+### Columns
+
+Every view (`-l`, `--ports`, and the kill confirmation) prints the same table:
+`PID  USER  PORT  PROCESS  …  COMMAND`. Add extra columns with `-c`, which is
+repeatable and also takes a comma-separated list:
+
+```bash
+slay -l -c mem -c age node     # add memory + age
+slay -l -c mem,threads node    # same, comma-separated
+slay --ports -c mem            # ports view, with memory
+```
+
+| Column     | Shows                                          |
+| ---------- | --------------------------------------------- |
+| `ppid`     | parent process id                              |
+| `mem`      | resident memory (RSS), human-readable          |
+| `threads`  | thread count                                   |
+| `state`    | process state (`R`/`S`/`D`/`Z`/…)              |
+| `nice`     | nice value                                     |
+| `time`     | cumulative CPU time                            |
+| `age`      | how long the process has been running          |
 
 ### Examples
 
