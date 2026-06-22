@@ -95,10 +95,11 @@ Short flags bundle: `slay -9y firefox` force-kills with no prompt.
 
 Every view (`-l` and the kill confirmation) prints the same table:
 `PID  USER  PROCESS  …  COMMAND`. A `PORT` column slots in automatically
-whenever you target a port. Add extra columns with `-c`, which is repeatable
-and also takes a comma-separated list:
+whenever you target a port, or you can add it anywhere with `-c port`. Add
+extra columns with `-c`, which is repeatable and also takes a comma list:
 
 ```bash
+slay -l -c port                # list everything, with its listening ports
 slay -l -c mem -c age node     # add memory + age
 slay -l -c mem,threads node    # same, comma-separated
 slay :8080 -c mem              # PORT shows because you targeted a port
@@ -106,6 +107,7 @@ slay :8080 -c mem              # PORT shows because you targeted a port
 
 | Column     | Shows                                          |
 | ---------- | --------------------------------------------- |
+| `port`     | TCP ports the process is listening on          |
 | `ppid`     | parent process id                              |
 | `mem`      | resident memory (RSS), human-readable          |
 | `threads`  | thread count                                   |

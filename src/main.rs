@@ -99,13 +99,14 @@ Mix them freely:  slay firefox 4123 :8080
   -i, --ignore-case    Case-insensitive name matching
   -u, --user <USER>    Only match processes owned by USER
   -c, --column <COL>   Add a column (repeatable, or comma-separated):
-                         ppid, mem, threads, state, nice, time, age
+                         port, ppid, mem, threads, state, nice, time, age
   -y, --yes            Don't ask for confirmation
   -l, --list           List matches instead of killing (a built-in pgrep)
   -h, --help           Show this help
   -V, --version        Print version
 
-A PORT column appears automatically whenever you target a port.
+The PORT column appears automatically when you target a port, or add it
+anywhere with `-c port`.
 
 {ex}
   slay node            # kill every process named like node (asks first)
@@ -447,6 +448,7 @@ impl Col {
 
 fn parse_col(s: &str) -> Result<Col, String> {
     Ok(match s.trim().to_lowercase().as_str() {
+        "port" | "ports" => Col::Port,
         "ppid" => Col::Ppid,
         "mem" | "rss" | "memory" => Col::Mem,
         "threads" | "thr" | "nlwp" => Col::Threads,
@@ -456,7 +458,7 @@ fn parse_col(s: &str) -> Result<Col, String> {
         "age" | "etime" | "elapsed" | "start" => Col::Age,
         other => {
             return Err(format!(
-                "unknown column `{other}` (try: ppid, mem, threads, state, nice, time, age)"
+                "unknown column `{other}` (try: port, ppid, mem, threads, state, nice, time, age)"
             ))
         }
     })
@@ -563,12 +565,77 @@ fn cell(col: Col, pr: &Proc, st: &Option<Stat>, sys: &Sys) -> String {
     }
 }
 
+/// Listening ports per displayed PID, as a comma-joined string. Built from the
+/// /proc/net tables crossed with each process's open socket inodes. Only called
+/// when the PORT column is actually shown, since it scans every listed pid's fds.
+fn listening_port_map(procs: &[Proc]) -> HashMap<i32, String> {
+    // Only TCP listeners — the "what is this serving" sense. (Bound UDP client
+    // sockets would flood the column with ephemeral ports.) A port the user
+    // explicitly targeted is merged in below regardless of protocol.
+    let mut inode_port: HashMap<u64, u16> = HashMap::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(txt) = fs::read_to_string(path) {
+            for line in txt.lines().skip(1) {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() < 10 || f[3] != "0A" {
+                    continue;
+                }
+                if let (Some(ph), Ok(ino)) = (f[1].rsplit(':').next(), f[9].parse::<u64>()) {
+                    if let Ok(p) = u16::from_str_radix(ph, 16) {
+                        inode_port.insert(ino, p);
+                    }
+                }
+            }
+        }
+    }
+    let mut ports: HashMap<i32, Vec<u16>> = HashMap::new();
+    for pr in procs {
+        if let Some(p) = pr.port {
+            ports.entry(pr.pid).or_default().push(p); // an explicitly targeted port
+        }
+        if inode_port.is_empty() {
+            continue;
+        }
+        if let Ok(fds) = fs::read_dir(format!("/proc/{}/fd", pr.pid)) {
+            for fd in fds.flatten() {
+                if let Ok(link) = fs::read_link(fd.path()) {
+                    if let Some(p) = link
+                        .to_str()
+                        .and_then(|s| s.strip_prefix("socket:["))
+                        .and_then(|s| s.strip_suffix(']'))
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .and_then(|ino| inode_port.get(&ino).copied())
+                    {
+                        ports.entry(pr.pid).or_default().push(p);
+                    }
+                }
+            }
+        }
+    }
+    ports
+        .into_iter()
+        .map(|(pid, mut v)| {
+            v.sort_unstable();
+            v.dedup();
+            // cap the width: show a few, then "+N" for the rest
+            let s = if v.len() > 4 {
+                let head = v[..4].iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                format!("{head},+{}", v.len() - 4)
+            } else {
+                v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+            };
+            (pid, s)
+        })
+        .collect()
+}
+
 // ─── rendering ──────────────────────────────────────────────────────────────
 fn print_table(procs: &[Proc], extra: &[Col], p: &Paint) {
     // PID USER [PORT] PROCESS  <extra…>  COMMAND  — COMMAND stays last (free width).
-    // PORT only shows when something was matched by port; otherwise it's noise.
+    // PORT shows when targeted by port, or asked for explicitly with `-c port`.
+    let want_port = extra.contains(&Col::Port) || procs.iter().any(|x| x.port.is_some());
     let mut cols = vec![Col::Pid, Col::User];
-    if procs.iter().any(|x| x.port.is_some()) {
+    if want_port {
         cols.push(Col::Port);
     }
     cols.push(Col::Name);
@@ -585,12 +652,24 @@ fn print_table(procs: &[Proc], extra: &[Col], p: &Paint) {
         .iter()
         .map(|pr| if need_stat { read_stat(pr.pid) } else { None })
         .collect();
+    let port_map = if want_port { listening_port_map(procs) } else { HashMap::new() };
 
     // precompute every cell so we can size columns
     let rows: Vec<Vec<String>> = procs
         .iter()
         .zip(&stats)
-        .map(|(pr, st)| cols.iter().map(|&c| cell(c, pr, st, &sys)).collect())
+        .map(|(pr, st)| {
+            cols.iter()
+                .map(|&c| match c {
+                    Col::Port => port_map
+                        .get(&pr.pid)
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| "-".into()),
+                    _ => cell(c, pr, st, &sys),
+                })
+                .collect()
+        })
         .collect();
 
     let widths: Vec<usize> = cols
