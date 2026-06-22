@@ -1,0 +1,23 @@
+[package]
+name = "slay"
+version = "1.0.0"
+edition = "2021"
+description = "A modern pkill — terminate processes by name, PID, or port (:8080)."
+license = "MIT"
+repository = "https://github.com/kierandrewett/slay"
+authors = ["Kieran Drewett"]
+readme = "README.md"
+keywords = ["pkill", "kill", "port", "process", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "slay"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+panic = "abort"
