@@ -65,10 +65,10 @@ struct Opts {
     exact: bool,
     ignore_case: bool,
     yes: bool,
-    dry_run: bool,
     user: Option<String>,
     targets: Vec<String>,
     list: bool,
+    ports: bool,
     help: bool,
     version: bool,
 }
@@ -77,36 +77,42 @@ fn print_help() {
     let p = Paint { on: use_color() };
     let b = |s: &str| p.bold(s);
     println!(
-        "{name} — a modern pkill. Terminate processes by name, PID, or port.
+        "{name} — a better pkill. Find and kill processes, then get out of your way.
 
 {usage}
-  slay <target>...          Kill matching processes (asks first)
-  slay :8080                Kill whatever is listening on port 8080
-  slay node                 Kill processes whose name contains \"node\"
-  slay 4123                 Kill PID 4123
-  slay -l                   List everything listening on a TCP port
+  slay <target>...          Kill matching processes (shows them, then asks)
+  slay -l <target>...       List matching processes instead of killing
+  slay -l                   List every process
 
-You can mix targets:  slay :3000 node 4123
+A {tgt} is matched by name, PID, or port — whichever it looks like:
+  slay firefox              by name      (substring of the process name)
+  slay 4123                 by PID       (an exact process id)
+  slay :8080                by port      (whoever is listening on it)
+
+Mix them freely:  slay firefox 4123 :8080
 
 {opts}
   -s, --signal <SIG>   Signal to send (name or number); default TERM
   -9                   Shorthand for --signal KILL
-  -f, --full           Match against the full command line, not just the name
+  -f, --full           Match the name against the full command line
   -x, --exact          Require an exact name match
   -i, --ignore-case    Case-insensitive name matching
   -u, --user <USER>    Only match processes owned by USER
   -y, --yes            Don't ask for confirmation
-  -n, --dry-run        Show what would be killed, but kill nothing
-  -l, --list           List all listening TCP ports
+  -l, --list           List matches instead of killing (a built-in pgrep)
+      --ports          Show everything currently listening on a TCP port
   -h, --help           Show this help
   -V, --version        Print version
 
 {ex}
-  slay :5432           # who's squatting on Postgres' port? kill it
-  slay -9 -y node      # force-kill every node process, no questions
-  slay -f vite -n      # preview every process whose cmdline mentions vite",
+  slay node            # kill every process named like node (asks first)
+  slay -9 -y firefox   # force-kill firefox, no questions
+  slay -l vite -f      # list every process whose cmdline mentions vite
+  slay :5432           # something on Postgres' port? kill it
+  slay --ports         # what am I even listening on right now?",
         name = b("slay"),
         usage = b("USAGE"),
+        tgt = b("target"),
         opts = b("OPTIONS"),
         ex = b("EXAMPLES"),
     );
@@ -119,10 +125,10 @@ fn parse_args() -> Result<Opts, String> {
         exact: false,
         ignore_case: false,
         yes: false,
-        dry_run: false,
         user: None,
         targets: Vec::new(),
         list: false,
+        ports: false,
         help: false,
         version: false,
     };
@@ -141,8 +147,8 @@ fn parse_args() -> Result<Opts, String> {
             "-x" | "--exact" => o.exact = true,
             "-i" | "--ignore-case" => o.ignore_case = true,
             "-y" | "--yes" => o.yes = true,
-            "-n" | "--dry-run" => o.dry_run = true,
             "-l" | "--list" => o.list = true,
+            "--ports" => o.ports = true,
             "-9" => o.signal = libc::SIGKILL,
             "-s" | "--signal" => {
                 let v = args.next().ok_or("--signal needs a value")?;
@@ -165,7 +171,6 @@ fn parse_args() -> Result<Opts, String> {
                         'x' => o.exact = true,
                         'i' => o.ignore_case = true,
                         'y' => o.yes = true,
-                        'n' => o.dry_run = true,
                         'l' => o.list = true,
                         '9' => o.signal = libc::SIGKILL,
                         'h' => o.help = true,
@@ -523,14 +528,23 @@ fn main() {
     let users = passwd_map();
     let procs = read_procs(&users);
 
-    if opts.list {
+    // --ports: the listening-ports overview (one feature, not the headline).
+    if opts.ports {
         list_ports(&procs, &p);
         return;
     }
 
+    // `slay -l` with no targets is a plain process listing.
+    if opts.list && opts.targets.is_empty() {
+        let mut all = procs.clone();
+        all.sort_by_key(|x| x.pid);
+        print_table(&all, &p);
+        return;
+    }
+
     if opts.targets.is_empty() {
-        eprintln!("slay: no targets. Give a name, PID, or :port — or `slay -l` to list ports.");
-        eprintln!("Try `slay --help`.");
+        eprintln!("slay: no targets. Give a name, PID, or :port.");
+        eprintln!("Try `slay -l` to browse, `slay --ports` for ports, or `slay --help`.");
         process::exit(2);
     }
 
@@ -599,6 +613,19 @@ fn main() {
     list.sort_by_key(|x| x.pid);
 
     let word = if list.len() == 1 { "process" } else { "processes" };
+
+    // -l: just show the matches and stop (a built-in pgrep).
+    if opts.list {
+        println!(
+            "{} {} {}:\n",
+            p.yellow("●"),
+            p.bold(&list.len().to_string()),
+            word
+        );
+        print_table(&list, &p);
+        return;
+    }
+
     println!(
         "{} {} {} matched:\n",
         p.yellow("●"),
@@ -607,17 +634,6 @@ fn main() {
     );
     print_table(&list, &p);
     println!();
-
-    if opts.dry_run {
-        println!(
-            "{} dry run — would send {} to {} {}.",
-            p.dim("·"),
-            p.bold(&signal_name(opts.signal)),
-            list.len(),
-            word
-        );
-        return;
-    }
 
     // Confirm unless -y. In a non-interactive shell, require -y for safety.
     if !opts.yes {

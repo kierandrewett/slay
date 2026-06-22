@@ -1,37 +1,56 @@
 # slay
 
-> A modern `pkill`. Terminate processes by name, PID, or **port**.
+> A better `pkill`. Find and kill processes, then get out of your way.
 
-`pkill` is great until you're staring at `EADDRINUSE` and have to go fishing for
-whatever's squatting on a port. `slay` folds that in: any target starting with
-`:` is a port, so `slay :8080` finds and kills whatever's listening there — and
-everything else works like a friendlier, safer `pkill`.
+`pkill` works, but it's fiddly: you can never remember whether you need `-f`,
+it kills silently with no idea what you actually hit, and it can't target a
+port. `slay` fixes the ergonomics — it **shows you what matched and asks before
+killing**, takes a name, a PID, *or* a port as a target, and ships a built-in
+`pgrep` so the same command can just list.
 
 ```
-$ slay :3000
-● 1 process matched:
+$ slay node
+● 2 processes matched:
 
       PID  USER     PORT  PROCESS  COMMAND
-   48213  kieran    3000  node     node /home/kieran/dev/app/server.js
+    48213  kieran      -  node     node /home/kieran/dev/app/server.js
+    48999  kieran      -  node     node /home/kieran/dev/api/worker.js
 
-Send SIGTERM to it? [y/N] y
+Send SIGTERM to all 2? [y/N] y
   ✓ node (pid 48213)
+  ✓ node (pid 48999)
 ```
 
-## Why it's nicer than `pkill`
+## What makes it better than `pkill`
 
-- **Kill by port.** `slay :8080` — the thing `pkill` can't do.
-- **One verb, three targets.** Names, PIDs, and ports, mixed freely:
-  `slay :3000 vite 4123`.
-- **Shows you first, asks before killing.** No more `pkill -f` regret. Skip the
-  prompt with `-y`; preview with `-n`.
+- **Shows you first, asks before killing.** No more silent `pkill -f` regret.
+  Skip the prompt with `-y`.
+- **List or kill with one command.** `slay -l node` lists matches (a built-in
+  `pgrep`); drop the `-l` and it kills them.
+- **Targets are smart.** Pass a name, a PID, or a port — `slay` figures out
+  which from how it looks, and you can mix them.
 - **Safe in scripts.** Refuses to kill without `-y` when there's no terminal.
-- **Tiny & fast.** A single Rust binary, one dependency (`libc`), reads
-  everything straight from `/proc`.
+- **Tiny & fast.** A single Rust binary, one dependency (`libc`), reading
+  straight from `/proc`.
+
+## Targets
+
+A target is matched by name, PID, or port — whichever it looks like:
+
+| You type    | Matched as | Means                                            |
+| ----------- | ---------- | ------------------------------------------------ |
+| `firefox`   | name       | substring of the process name (`-f` for cmdline) |
+| `4123`      | PID        | an exact process id                              |
+| `:8080`     | port       | whoever is listening on it (TCP or UDP)          |
+
+```bash
+slay firefox 4123 :8080   # mix freely
+```
+
+The port target is the bit `pkill` can't do — handy for the `EADDRINUSE`
+dance — but it's just one of the three ways to name what you want gone.
 
 ## Install
-
-With Cargo:
 
 ```bash
 cargo install --git https://github.com/kierandrewett/slay
@@ -49,20 +68,11 @@ Linux only (it reads `/proc`).
 ## Usage
 
 ```
-slay <target>...          Kill matching processes (asks first)
-slay :8080                Kill whatever is listening on port 8080
-slay node                 Kill processes whose name contains "node"
-slay 4123                 Kill PID 4123
-slay -l                   List everything listening on a TCP port
+slay <target>...          Kill matching processes (shows them, then asks)
+slay -l <target>...       List matching processes instead of killing
+slay -l                   List every process
+slay --ports              Show everything currently listening on a TCP port
 ```
-
-A target is classified automatically:
-
-| You type    | Means                                            |
-| ----------- | ------------------------------------------------ |
-| `:8080`     | Port — kill whoever listens on it (TCP or UDP)   |
-| `4123`      | PID — an exact process id                          |
-| `vite`      | Name — substring match on the process name        |
 
 ### Options
 
@@ -70,25 +80,26 @@ A target is classified automatically:
 | --------------------- | ---------------------------------------------------- |
 | `-s, --signal <SIG>`  | Signal to send (name or number); default `TERM`      |
 | `-9`                  | Shorthand for `--signal KILL`                        |
-| `-f, --full`          | Match against the full command line, not just name   |
+| `-f, --full`          | Match the name against the full command line         |
 | `-x, --exact`         | Require an exact name match                           |
 | `-i, --ignore-case`   | Case-insensitive name matching                       |
 | `-u, --user <USER>`   | Only match processes owned by USER                   |
 | `-y, --yes`           | Don't ask for confirmation                           |
-| `-n, --dry-run`       | Show what would be killed, kill nothing              |
-| `-l, --list`          | List all listening TCP ports                          |
+| `-l, --list`          | List matches instead of killing (a built-in pgrep)   |
+| `--ports`             | Show everything listening on a TCP port              |
 | `-h, --help`          | Show help                                             |
 | `-V, --version`       | Print version                                         |
 
-Short flags bundle: `slay -9y node` force-kills every `node` with no prompt.
+Short flags bundle: `slay -9y firefox` force-kills with no prompt.
 
 ### Examples
 
 ```bash
-slay :5432           # who's squatting on Postgres' port? kill it
-slay -9 -y node      # force-kill every node process, no questions
-slay -f vite -n      # preview every process whose cmdline mentions vite
-slay :3000 :3001     # clear out a couple of dev ports at once
+slay node            # kill every process named like node (asks first)
+slay -9 -y firefox   # force-kill firefox, no questions
+slay -l vite -f      # list every process whose cmdline mentions vite
+slay :5432           # something on Postgres' port? kill it
+slay --ports         # what am I even listening on right now?
 ```
 
 When a kill reports `permission denied`, the process belongs to another user —

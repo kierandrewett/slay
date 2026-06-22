@@ -2,7 +2,7 @@
 name = "slay"
 version = "1.0.0"
 edition = "2021"
-description = "A modern pkill — terminate processes by name, PID, or port (:8080)."
+description = "A better pkill — find and kill processes by name, PID, or port; shows matches and asks first."
 license = "MIT"
 repository = "https://github.com/kierandrewett/slay"
 authors = ["Kieran Drewett"]
