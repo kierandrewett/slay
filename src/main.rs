@@ -69,7 +69,6 @@ struct Opts {
     columns: Vec<Col>,
     targets: Vec<String>,
     list: bool,
-    ports: bool,
     help: bool,
     version: bool,
 }
@@ -103,17 +102,17 @@ Mix them freely:  slay firefox 4123 :8080
                          ppid, mem, threads, state, nice, time, age
   -y, --yes            Don't ask for confirmation
   -l, --list           List matches instead of killing (a built-in pgrep)
-      --ports          Show everything currently listening on a TCP port
   -h, --help           Show this help
   -V, --version        Print version
+
+A PORT column appears automatically whenever you target a port.
 
 {ex}
   slay node            # kill every process named like node (asks first)
   slay -9 -y firefox   # force-kill firefox, no questions
   slay -l vite -f      # list every process whose cmdline mentions vite
   slay -l -c mem -c age node   # list node procs with memory and age columns
-  slay :5432           # something on Postgres' port? kill it
-  slay --ports         # what am I even listening on right now?",
+  slay :5432           # something on Postgres' port? kill it",
         name = b("slay"),
         usage = b("USAGE"),
         tgt = b("target"),
@@ -133,7 +132,6 @@ fn parse_args() -> Result<Opts, String> {
         columns: Vec::new(),
         targets: Vec::new(),
         list: false,
-        ports: false,
         help: false,
         version: false,
     };
@@ -153,7 +151,6 @@ fn parse_args() -> Result<Opts, String> {
             "-i" | "--ignore-case" => o.ignore_case = true,
             "-y" | "--yes" => o.yes = true,
             "-l" | "--list" => o.list = true,
-            "--ports" => o.ports = true,
             "-9" => o.signal = libc::SIGKILL,
             "-s" | "--signal" => {
                 let v = args.next().ok_or("--signal needs a value")?;
@@ -200,6 +197,8 @@ fn parse_args() -> Result<Opts, String> {
                     }
                 }
             }
+            // reject unknown long flags instead of treating them as targets
+            s if s.starts_with("--") => return Err(format!("unknown flag {s}")),
             _ => o.targets.push(a),
         }
     }
@@ -566,8 +565,13 @@ fn cell(col: Col, pr: &Proc, st: &Option<Stat>, sys: &Sys) -> String {
 
 // ─── rendering ──────────────────────────────────────────────────────────────
 fn print_table(procs: &[Proc], extra: &[Col], p: &Paint) {
-    // PID USER PORT PROCESS  <extra…>  COMMAND  — COMMAND stays last (free width).
-    let mut cols = vec![Col::Pid, Col::User, Col::Port, Col::Name];
+    // PID USER [PORT] PROCESS  <extra…>  COMMAND  — COMMAND stays last (free width).
+    // PORT only shows when something was matched by port; otherwise it's noise.
+    let mut cols = vec![Col::Pid, Col::User];
+    if procs.iter().any(|x| x.port.is_some()) {
+        cols.push(Col::Port);
+    }
+    cols.push(Col::Name);
     for &c in extra {
         if !cols.contains(&c) {
             cols.push(c);
@@ -651,65 +655,6 @@ fn signal_name(sig: i32) -> String {
     format!("SIG{n}")
 }
 
-// ─── listing ────────────────────────────────────────────────────────────────
-fn list_ports(procs: &[Proc], extra: &[Col], p: &Paint) {
-    // Build inode→port for all TCP listeners, then map to pids.
-    let mut inode_port: HashMap<u64, u16> = HashMap::new();
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(txt) = fs::read_to_string(path) {
-            for line in txt.lines().skip(1) {
-                let f: Vec<&str> = line.split_whitespace().collect();
-                if f.len() < 10 || f[3] != "0A" {
-                    continue;
-                }
-                if let (Some(ph), Ok(ino)) = (f[1].rsplit(':').next(), f[9].parse::<u64>()) {
-                    if let Ok(port) = u16::from_str_radix(ph, 16) {
-                        inode_port.insert(ino, port);
-                    }
-                }
-            }
-        }
-    }
-    let by_pid: HashMap<i32, &Proc> = procs.iter().map(|x| (x.pid, x)).collect();
-    let mut rows: Vec<Proc> = Vec::new();
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for ent in entries.flatten() {
-            let pid: i32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => continue,
-            };
-            let fds = match fs::read_dir(format!("/proc/{pid}/fd")) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            for fd in fds.flatten() {
-                if let Ok(link) = fs::read_link(fd.path()) {
-                    if let Some(port) = link
-                        .to_str()
-                        .and_then(|s| s.strip_prefix("socket:["))
-                        .and_then(|s| s.strip_suffix(']'))
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .and_then(|ino| inode_port.get(&ino).copied())
-                    {
-                        if let Some(pr) = by_pid.get(&pid) {
-                            let mut c = (*pr).clone();
-                            c.port = Some(port);
-                            rows.push(c);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    rows.sort_by_key(|r| (r.port.unwrap_or(0), r.pid));
-    rows.dedup_by_key(|r| (r.port.unwrap_or(0), r.pid));
-    if rows.is_empty() {
-        println!("{} Nothing is listening on a TCP port.", p.green("✓"));
-        return;
-    }
-    print_table(&rows, extra, p);
-}
-
 // ─── kill ───────────────────────────────────────────────────────────────────
 fn confirm(prompt: &str) -> bool {
     print!("{prompt}");
@@ -748,12 +693,6 @@ fn main() {
     let users = passwd_map();
     let procs = read_procs(&users);
 
-    // --ports: the listening-ports overview (one feature, not the headline).
-    if opts.ports {
-        list_ports(&procs, &opts.columns, &p);
-        return;
-    }
-
     // `slay -l` with no targets is a plain process listing.
     if opts.list && opts.targets.is_empty() {
         let mut all = procs.clone();
@@ -764,7 +703,7 @@ fn main() {
 
     if opts.targets.is_empty() {
         eprintln!("slay: no targets. Give a name, PID, or :port.");
-        eprintln!("Try `slay -l` to browse, `slay --ports` for ports, or `slay --help`.");
+        eprintln!("Try `slay -l` to browse, or `slay --help`.");
         process::exit(2);
     }
 

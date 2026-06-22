@@ -71,7 +71,6 @@ Linux only (it reads `/proc`).
 slay <target>...          Kill matching processes (shows them, then asks)
 slay -l <target>...       List matching processes instead of killing
 slay -l                   List every process
-slay --ports              Show everything currently listening on a TCP port
 ```
 
 ### Options
@@ -87,7 +86,6 @@ slay --ports              Show everything currently listening on a TCP port
 | `-c, --column <COL>`  | Add a column to the table (repeatable)               |
 | `-y, --yes`           | Don't ask for confirmation                           |
 | `-l, --list`          | List matches instead of killing (a built-in pgrep)   |
-| `--ports`             | Show everything listening on a TCP port              |
 | `-h, --help`          | Show help                                             |
 | `-V, --version`       | Print version                                         |
 
@@ -95,14 +93,15 @@ Short flags bundle: `slay -9y firefox` force-kills with no prompt.
 
 ### Columns
 
-Every view (`-l`, `--ports`, and the kill confirmation) prints the same table:
-`PID  USER  PORT  PROCESS  …  COMMAND`. Add extra columns with `-c`, which is
-repeatable and also takes a comma-separated list:
+Every view (`-l` and the kill confirmation) prints the same table:
+`PID  USER  PROCESS  …  COMMAND`. A `PORT` column slots in automatically
+whenever you target a port. Add extra columns with `-c`, which is repeatable
+and also takes a comma-separated list:
 
 ```bash
 slay -l -c mem -c age node     # add memory + age
 slay -l -c mem,threads node    # same, comma-separated
-slay --ports -c mem            # ports view, with memory
+slay :8080 -c mem              # PORT shows because you targeted a port
 ```
 
 | Column     | Shows                                          |
@@ -122,7 +121,7 @@ slay node            # kill every process named like node (asks first)
 slay -9 -y firefox   # force-kill firefox, no questions
 slay -l vite -f      # list every process whose cmdline mentions vite
 slay :5432           # something on Postgres' port? kill it
-slay --ports         # what am I even listening on right now?
+slay -l -c mem node  # list node procs with a memory column
 ```
 
 When a kill reports `permission denied`, the process belongs to another user —
